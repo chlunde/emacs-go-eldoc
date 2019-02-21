@@ -151,26 +151,24 @@
            (setq old-point (point))
            finally return retval))
 
-(defun go-eldoc--invoke-autocomplete ()
+(defun go-eldoc--invoke-autocomplete (autocomplete-results-cb)
   (let ((temp-buffer (get-buffer-create "*go-eldoc*"))
         (gocode-args (append go-eldoc-gocode-args
                              (list "-f=emacs"
                                    "autocomplete"
                                    (or (buffer-file-name) "")
                                    (concat "c" (int-to-string (- (point) 1)))))))
-    (unwind-protect
-        (progn
-          (apply #'call-process-region
-                 (point-min)
-                 (point-max)
-                 go-eldoc-gocode
-                 nil
-                 temp-buffer
-                 nil
-                 gocode-args)
-          (with-current-buffer temp-buffer
-            (buffer-string)))
-      (kill-buffer temp-buffer))))
+    (progn
+      (let ((proc (apply #'start-process "gocode-process" temp-buffer go-eldoc-gocode gocode-args))
+            (code-buffer (current-buffer)))
+        (set-process-sentinel proc (lambda (process event)
+                                     (unwind-protect
+                                         (when (eq (current-buffer) code-buffer)
+                                           (ignore-errors (funcall autocomplete-results-cb (with-current-buffer temp-buffer (buffer-string)))))
+                                       (kill-buffer temp-buffer))))
+        (process-send-region proc (point-min) (point-max))
+        (process-send-eof proc)))))
+
 
 (defsubst go-eldoc--assignment-index (lhs)
   (1+ (cl-loop for c across lhs
@@ -216,7 +214,7 @@
       (when (go-eldoc--goto-statement-end)
         (- (go-eldoc--assignment-index lhs))))))
 
-(defun go-eldoc--get-funcinfo ()
+(defun go-eldoc--get-funcinfo (funcinfo-results-cb)
   (save-excursion
     (let ((curpoint (point))
           assignment-index)
@@ -224,19 +222,24 @@
           (go-goto-beginning-of-string-or-comment)
         (when (setq assignment-index (go-eldoc--assignment-p curpoint))
           (setq curpoint (point))))
-      (when (go-eldoc--goto-beginning-of-funcall)
-        (when (and (go-eldoc--inside-funcall-p (1- (point)) curpoint)
-                   (not (go-eldoc--inside-anon-function-p (1- (point)) curpoint)))
-          (let ((matched (go-eldoc--match-candidates
-                          (go-eldoc--invoke-autocomplete) (thing-at-point 'symbol)
-                          curpoint)))
-            (when (and matched
-                       (string-match "\\`\\(.+?\\),,\\(.+\\)$" matched))
-              (let ((funcname (match-string-no-properties 1 matched))
-                    (signature (match-string-no-properties 2 matched)))
-                (list :name funcname :signature signature
-                      :index (or assignment-index
-                                 (go-eldoc--current-arg-index curpoint)))))))))))
+      (if (and (go-eldoc--goto-beginning-of-funcall)
+               (go-eldoc--inside-funcall-p (1- (point)) curpoint)
+               (not (go-eldoc--inside-anon-function-p (1- (point)) curpoint)))
+          (let ((thap (thing-at-point 'symbol)))
+            (go-eldoc--invoke-autocomplete
+             (lambda (candidates)
+               (let ((matched (go-eldoc--match-candidates
+                               candidates thap
+                               curpoint)))
+                 (if (and matched
+                          (string-match "\\`\\(.+?\\),,\\(.+\\)$" matched))
+                     (let ((funcname (match-string-no-properties 1 matched))
+                           (signature (match-string-no-properties 2 matched)))
+                       (funcall funcinfo-results-cb (list :name funcname :signature signature
+                                                          :index (or assignment-index
+                                                                     (go-eldoc--current-arg-index curpoint)))))
+                   (funcall funcinfo-results-cb nil))))))
+        (funcall funcinfo-results-cb nil)))))
 
 (defsubst go-eldoc--no-argument-p (arg-type)
   (string-match-p "\\`\\s-+\\'" arg-type))
@@ -377,12 +380,11 @@
           ((string-match (format "^%s,,\\(.+\\)$" symbol) typeinfo)
            (match-string-no-properties 1 typeinfo)))))
 
-(defun go-eldoc--get-cursor-info (bounds)
+(defun go-eldoc--get-cursor-info (bounds cursor-info-results-cb)
   (save-excursion
     (goto-char (cdr bounds))
-    (go-eldoc--retrieve-type
-     (go-eldoc--invoke-autocomplete)
-     (buffer-substring-no-properties (car bounds) (cdr bounds)))))
+    (go-eldoc--invoke-autocomplete (lambda (comps)
+                                     (funcall cursor-info-results-cb (go-eldoc--retrieve-type comps (buffer-substring-no-properties (car bounds) (cdr bounds))))))))
 
 (defun go-eldoc--retrieve-concrete-name (bounds)
   (save-excursion
@@ -406,16 +408,20 @@
               'face 'font-lock-variable-name-face))
 
 (defun go-eldoc--documentation-function ()
-  (let ((funcinfo (go-eldoc--get-funcinfo)))
-    (if funcinfo
-        (go-eldoc--format-signature funcinfo)
-      (let ((bounds (go-eldoc--bounds-of-go-symbol)))
-        (when bounds
-          (let ((curinfo (go-eldoc--get-cursor-info bounds)))
-            (when curinfo
-              (format "%s: %s"
-                      (go-eldoc--propertize-cursor-thing bounds)
-                      curinfo))))))))
+  (let ((bounds (go-eldoc--bounds-of-go-symbol)))
+    (go-eldoc--get-funcinfo
+     (lambda (funcinfo)
+       (if funcinfo
+           (eldoc-message (go-eldoc--format-signature funcinfo))
+         (when bounds
+           (go-eldoc--get-cursor-info
+            bounds
+            (lambda (curinfo)
+              (eldoc-message (format "%s: %s"
+                                     (go-eldoc--propertize-cursor-thing bounds)
+                                     curinfo)))))))))
+  ;; return nil for now, async callbacks will use eldoc-message when results are ready
+  nil)
 
 ;;;###autoload
 (defun go-eldoc-setup ()

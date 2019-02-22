@@ -225,7 +225,9 @@
       (if (and (go-eldoc--goto-beginning-of-funcall)
                (go-eldoc--inside-funcall-p (1- (point)) curpoint)
                (not (go-eldoc--inside-anon-function-p (1- (point)) curpoint)))
-          (let ((thap (thing-at-point 'symbol)))
+          (let ((thap (thing-at-point 'symbol))
+                (assignment-index (or assignment-index
+                                      (go-eldoc--current-arg-index curpoint))))
             (go-eldoc--invoke-autocomplete
              (lambda (candidates)
                (let ((matched (go-eldoc--match-candidates
@@ -236,8 +238,7 @@
                      (let ((funcname (match-string-no-properties 1 matched))
                            (signature (match-string-no-properties 2 matched)))
                        (funcall funcinfo-results-cb (list :name funcname :signature signature
-                                                          :index (or assignment-index
-                                                                     (go-eldoc--current-arg-index curpoint)))))
+                                                          :index assignment-index)))
                    (funcall funcinfo-results-cb nil))))))
         (funcall funcinfo-results-cb nil)))))
 

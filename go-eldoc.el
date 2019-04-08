@@ -165,7 +165,8 @@
                                      (unwind-protect
                                          (when (eq (current-buffer) code-buffer)
                                            (ignore-errors (funcall autocomplete-results-cb (with-current-buffer temp-buffer (buffer-string)))))
-                                       (kill-buffer temp-buffer))))
+                                       (let ((kill-buffer-query-functions nil))
+										 (kill-buffer temp-buffer)))))
         (process-send-region proc (point-min) (point-max))
         (process-send-eof proc)))))
 
